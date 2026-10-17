@@ -23,3 +23,5 @@ rm -f "$tmp"
 
 echo "tvim built: $REPO_DIR/bin/tvim"
 echo "PATH updated in $BASHRC - run 'source ~/.bashrc' (or open a new shell), then: tvim <file>"
+
+

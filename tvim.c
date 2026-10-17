@@ -1226,7 +1226,7 @@ static void draw(void) {
     ab_str(&ab, "\x1b[m\r\n");
     /* message line */
     const char *msg = E.msg;
-    char hint[] = "Esc Exit (autosaves) | Ctrl+F Find | Ctrl+R Replace | F1 Help";
+    char hint[] = "Esc Exit (autosaves) | Ctrl+F Find | F1 Help";
     if (!(msg[0] && time(NULL) - E.msgt < 5)) msg = hint;
     int ml = (int)strlen(msg); if (ml > E.cols) ml = E.cols;
     ab_str(&ab, "\x1b[38;5;245m");
@@ -1696,32 +1696,6 @@ static void do_find(void) {
     free(q);
 }
 
-static void do_replace(void) {
-    char *q = prompt("Replace - find: ", E.lastq, NULL);
-    if (!q || !*q) { free(q); return; }
-    free(E.lastq); E.lastq = q;
-    char *rep = prompt("Replace with: ", NULL, NULL);
-    if (!rep) return;
-    int ql = (int)strlen(q), rl = (int)strlen(rep), ci = ci_for(q), count = 0;
-    undo_begin(0);
-    for (int r = 0; r < E.n; r++) {
-        Line *L = &E.l[r];
-        for (int i = 0; i + ql <= L->len;) {
-            if (match_at(L->s + i, q, ql, ci)) {
-                line_del(L, i, ql);
-                line_insert(L, i, rep, rl);
-                i += rl ? rl : 1;
-                count++;
-            } else i++;
-        }
-    }
-    free(rep);
-    E.sel = 0;
-    hl_valid = 0;
-    clamp_cursor();
-    set_msg("Replaced %d occurrence%s", count, count == 1 ? "" : "s");
-}
-
 /* ---------- save / quit ---------- */
 
 static void do_save(int as) {
@@ -1790,7 +1764,6 @@ static void show_help(void) {
         "           Ctrl+D duplicate line/selection",
         "           Tab / Shift+Tab indent / unindent",
         "Search     Ctrl+F find          F3 / Shift+F3 next / prev",
-        "           Ctrl+R replace all",
         "",
         "Press any key to return.",
     };
@@ -1891,7 +1864,6 @@ static void process_key(int key) {
     case CTRL('z'): do_undo(); clamp_cursor(); return;
     case CTRL('y'): do_redo(); clamp_cursor(); return;
     case CTRL('f'): do_find(); return;
-    case CTRL('r'): do_replace(); return;
     case CTRL('k'): delete_line(); return;
     case CTRL('d'): duplicate(); return;
     case CTRL('h'): do_backspace(1); return; /* Ctrl+Backspace on most terminals */

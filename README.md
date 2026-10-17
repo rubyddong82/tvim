@@ -28,7 +28,6 @@ tvim notes.txt
 | Duplicate line/selection | Ctrl+D |
 | Indent / unindent | Tab / Shift+Tab |
 | Find | Ctrl+F (Enter/Down next, Up previous, Esc done), F3 / Shift+F3 |
-| Replace all | Ctrl+R |
 | Help | F1 |
 
 Copy also writes to the system clipboard through OSC 52 (Windows Terminal, kitty, iTerm2, ...).
