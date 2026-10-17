@@ -42,3 +42,11 @@ Syntax highlighting is picked from the file extension: Markdown (colours follow 
 download site: bold pink-red, green headings/list markers/links, dim struck-through `- [x]` items, code
 spans and fences), JavaScript/TypeScript, Python, JSON, HTML (with embedded `<script>`/`<style>`), CSS,
 C/C++, and shell-style files (`.sh`, `.yml`, `.toml`, `.conf`, `.ini`, `Makefile`, ...).
+
+### Live markdown preview
+
+In `.md` files every line except the cursor line (and lines inside a selection) is shown rendered: `#`, `**`, `*`,
+`` ` `` and link syntax are hidden, `-` becomes a bullet, `- [ ]` / `- [x]` become ☐ / ☑, `>` becomes a bar, `---`
+becomes a full-width rule, and pipe tables are drawn as aligned boxes (honouring `:---:` alignment, bold header,
+inline markdown inside cells). Move onto a line (or click it) and its raw text comes back for editing.
+F4 turns the preview off and on. Images and larger heading sizes aren't possible in a terminal.

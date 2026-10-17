@@ -36,7 +36,7 @@
 enum {
     K_NONE = 0,
     K_UP = K_SPECIAL + 1, K_DOWN, K_LEFT, K_RIGHT, K_HOME, K_END, K_PGUP, K_PGDN,
-    K_DEL, K_INS, K_F1, K_F2, K_F3, K_BTAB, K_MOUSE, K_PASTE, K_RESIZE
+    K_DEL, K_INS, K_F1, K_F2, K_F3, K_F4, K_BTAB, K_MOUSE, K_PASTE, K_RESIZE
 };
 
 #define KEY_ESC 27
@@ -466,6 +466,7 @@ static int read_csi(void) {
     case 'P': return K_F1 | mod;
     case 'Q': return K_F2 | mod;
     case 'R': return K_F3 | mod;
+    case 'S': return K_F4 | mod;
     case '~':
         switch (params[0]) {
         case 1: case 7: return K_HOME | mod;
@@ -477,6 +478,7 @@ static int read_csi(void) {
         case 11: return K_F1 | mod;
         case 12: return K_F2 | mod;
         case 13: return K_F3 | mod;
+        case 14: return K_F4 | mod;
         case 200: read_paste(); return K_PASTE;
         }
     }
@@ -502,7 +504,7 @@ static int read_key(void) {
                 case 'A': return K_UP; case 'B': return K_DOWN;
                 case 'C': return K_RIGHT; case 'D': return K_LEFT;
                 case 'H': return K_HOME; case 'F': return K_END;
-                case 'P': return K_F1; case 'Q': return K_F2; case 'R': return K_F3;
+                case 'P': return K_F1; case 'Q': return K_F2; case 'R': return K_F3; case 'S': return K_F4;
                 }
                 return K_NONE;
             }
@@ -603,6 +605,10 @@ static int save_file(void) {
 }
 
 /* ---------- syntax highlighting ---------- */
+
+#define C_MASK 0x3f
+#define F_HID 0x80 /* markdown marker hidden in the live preview */
+#define F_REP 0x40 /* bullet / checkbox / quote marker replaced by a symbol */
 
 enum { C_NONE, C_KEYWORD, C_TYPE, C_STRING, C_NUMBER, C_COMMENT, C_FUNC, C_TAG, C_ATTR,
        C_HEAD, C_BOLD, C_ITALIC, C_CODE, C_LINK, C_URL, C_MARK, C_QUOTE, C_HR, C_DONE, C_SEL };
@@ -867,16 +873,17 @@ static void md_inline(const char *s, int a, int b, uint8_t *cls) {
         if (c == '\\' && i + 1 < b) { i += 2; continue; }
         if (c == '`') {
             const char *e = find_str(s, b, i + 1, "`");
-            if (e) { int end = (int)(e - s) + 1; paint(cls, i, end, C_CODE); i = end; continue; }
+            if (e) { int end = (int)(e - s) + 1; paint(cls, i, end, C_CODE); cls[i] |= F_HID; cls[end - 1] |= F_HID; i = end; continue; }
         } else if ((c == '*' || c == '_') && i + 1 < b && s[i + 1] == c) {
             char t[3] = { c, c, 0 };
             const char *e = find_str(s, b, i + 2, t);
             if (e && (int)(e - s) > i + 2 && (c == '*' || i == a || !id_char(s[i - 1]))) {
-                int end = (int)(e - s) + 2; paint(cls, i, end, C_BOLD); i = end; continue;
+                int end = (int)(e - s) + 2; paint(cls, i, end, C_BOLD);
+                cls[i] |= F_HID; cls[i + 1] |= F_HID; cls[end - 1] |= F_HID; cls[end - 2] |= F_HID; i = end; continue;
             }
         } else if (c == '*' && i + 1 < b && s[i + 1] != ' ') {
             const char *e = find_str(s, b, i + 1, "*");
-            if (e && (int)(e - s) > i + 1) { int end = (int)(e - s) + 1; paint(cls, i, end, C_ITALIC); i = end; continue; }
+            if (e && (int)(e - s) > i + 1) { int end = (int)(e - s) + 1; paint(cls, i, end, C_ITALIC); cls[i] |= F_HID; cls[end - 1] |= F_HID; i = end; continue; }
         } else if (c == '[' || (c == '!' && i + 1 < b && s[i + 1] == '[')) {
             int o = c == '!' ? i + 1 : i;
             const char *cb = find_str(s, b, o + 1, "](");
@@ -887,6 +894,8 @@ static void md_inline(const char *s, int a, int b, uint8_t *cls) {
                     int end = (int)(cp - s) + 1;
                     paint(cls, i, mid + 1, C_LINK);
                     paint(cls, mid + 1, end, C_URL);
+                    for (int q = i; q <= o; q++) cls[q] |= F_HID;           /* [ (and ! for images) */
+                    for (int q = mid; q < end; q++) cls[q] |= F_HID;        /* ](url) */
                     i = end; continue;
                 }
             }
@@ -922,9 +931,13 @@ static int scan_md(const char *s, int n, int st, uint8_t *cls) {
     int base = C_NONE, body = j;
     if (j < n && s[j] == '#') {
         int k = j; while (k < n && s[k] == '#') k++;
-        if (k - j <= 6 && (k == n || s[k] == ' ')) { base = C_HEAD; paint(cls, 0, n, C_HEAD); }
+        if (k - j <= 6 && (k == n || s[k] == ' ')) {
+            base = C_HEAD; paint(cls, 0, n, C_HEAD);
+            body = k + (k < n ? 1 : 0);
+            for (int q = j; q < body; q++) cls[q] |= F_HID;
+        }
     } else if (j < n && s[j] == '>') {
-        paint(cls, j, j + 1, C_MARK);
+        cls[j] = C_MARK | F_REP;
         base = C_QUOTE; body = j + 1;
         paint(cls, body, n, C_QUOTE);
     } else {
@@ -933,10 +946,13 @@ static int scan_md(const char *s, int n, int st, uint8_t *cls) {
         else { while (k < n && isdigit((unsigned char)s[k])) k++; if (k > j && k + 1 < n && (s[k] == '.' || s[k] == ')') && s[k + 1] == ' ') k++; else k = j; }
         if (k > j) {
             paint(cls, j, k, C_MARK);
+            if (!isdigit((unsigned char)s[j])) cls[j] |= F_REP;
             body = k;
             while (body < n && s[body] == ' ') body++;
             if (n - body >= 3 && s[body] == '[' && s[body + 2] == ']' && (s[body + 1] == ' ' || s[body + 1] == 'x' || s[body + 1] == 'X')) {
                 paint(cls, body, body + 3, C_MARK);
+                cls[body] |= F_REP; cls[body + 1] |= F_HID; cls[body + 2] |= F_HID;
+                for (int q = j; q < body; q++) cls[q] = C_MARK | F_HID; /* the bullet itself: the box replaces it */
                 if (s[body + 1] != ' ') { base = C_DONE; paint(cls, body + 3, n, C_DONE); }
                 body += 3;
             }
@@ -969,20 +985,27 @@ static int hl_scan_line(int r, int st, uint8_t *cls) {
     return st;
 }
 
-/* Colour classes for line r (valid until the next call), or NULL when not highlighting. */
-static const uint8_t *hl_line(int r) {
-    if (hl_lang == L_NONE) return NULL;
+/* Scanner state at the start of line r. */
+static int hl_state_get(int r) {
+    if (hl_lang == L_NONE) return ST_NONE;
     if (hl_cap < E.n + 1) { hl_cap = E.n + 64; hl_state = xrealloc(hl_state, hl_cap); }
     if (hl_valid > E.n) hl_valid = E.n;
-    if (E.l[r].len + 1 > hl_clscap) { hl_clscap = E.l[r].len + 256; hl_cls = xrealloc(hl_cls, hl_clscap); }
     if (hl_valid == 0) hl_state[0] = ST_NONE;
     while (hl_valid < r) {
         Line *P = &E.l[hl_valid];
-        if (P->len > hl_clscap) { hl_clscap = P->len + 256; hl_cls = xrealloc(hl_cls, hl_clscap); }
+        if (P->len + 1 > hl_clscap) { hl_clscap = P->len + 256; hl_cls = xrealloc(hl_cls, hl_clscap); }
         hl_state[hl_valid + 1] = hl_scan_line(hl_valid, hl_state[hl_valid], hl_cls);
         hl_valid++;
     }
-    hl_scan_line(r, hl_state[r], hl_cls);
+    return hl_state[r];
+}
+
+/* Colour classes for line r (valid until the next call), or NULL when not highlighting. */
+static const uint8_t *hl_line(int r) {
+    if (hl_lang == L_NONE) return NULL;
+    int st = hl_state_get(r);
+    if (E.l[r].len + 1 > hl_clscap) { hl_clscap = E.l[r].len + 256; hl_cls = xrealloc(hl_cls, hl_clscap); }
+    hl_scan_line(r, st, hl_cls);
     return hl_cls;
 }
 
@@ -1019,6 +1042,205 @@ typedef struct { int r, sub; } VRow;
 static int wrapw(void) {
     int w = E.cols - gutter_w() - 1;
     return w < 1 ? 1 : w;
+}
+
+/* ---------- live markdown preview ---------- */
+
+/* Lines other than the cursor line (and lines in the selection) are shown "concealed":
+ * markers hidden, bullets/checkboxes replaced, tables drawn as aligned boxes. A View holds
+ * the displayed text plus a map from displayed bytes back to bytes of the real line. */
+static int conceal_on = 1;
+typedef struct { Line L; int *map; uint8_t *cls; int on; } View;
+typedef struct { char *d; int *map; uint8_t *cls; int len, cap; } Bld;
+
+static void bld_put(Bld *b, const char *t, int n, int src, int cl) {
+    if (b->len + n + 1 > b->cap) {
+        b->cap = (b->len + n + 1) * 2;
+        b->d = xrealloc(b->d, b->cap);
+        b->map = xrealloc(b->map, b->cap * sizeof(int));
+        b->cls = xrealloc(b->cls, b->cap);
+    }
+    for (int k = 0; k < n; k++) { b->d[b->len + k] = t[k]; b->map[b->len + k] = src; b->cls[b->len + k] = cl; }
+    b->len += n;
+}
+
+/* Append the visible part of s[from,to) given per-byte classes. */
+static void bld_span(Bld *b, const char *s, int from, int to, const uint8_t *cls) {
+    for (int i = from; i < to; i++) {
+        int f = cls[i], c = f & C_MASK;
+        if (f & F_HID) continue;
+        if (f & F_REP) {
+            const char *r = s[i] == '[' ? (i + 1 < to && s[i + 1] == ' ' ? "☐" : "☑")
+                          : s[i] == '>' ? "▎" : "•";
+            bld_put(b, r, (int)strlen(r), i, c);
+        } else bld_put(b, s + i, 1, i, c);
+    }
+}
+
+static void view_free(View *v) {
+    free(v->L.s); free(v->map); free(v->cls);
+    memset(v, 0, sizeof *v);
+}
+
+static void bld_finish(Bld *b, int srclen, View *v) {
+    bld_put(b, "", 0, srclen, 0);
+    b->map = xrealloc(b->map, (b->len + 1) * sizeof(int));
+    b->map[b->len] = srclen;
+    b->d = xrealloc(b->d, b->len + 1);
+    b->cls = xrealloc(b->cls, b->len + 1);
+    v->L.s = b->d; v->L.len = b->len; v->L.cap = b->len;
+    v->map = b->map; v->cls = b->cls; v->on = 1;
+}
+
+static int hl_state_get(int r);
+
+static int is_pipe_row(const Line *L) {
+    int i = 0;
+    while (i < L->len && (L->s[i] == ' ' || L->s[i] == '\t')) i++;
+    return i < L->len && L->s[i] == '|';
+}
+
+/* Trimmed cell ranges of a pipe row. */
+static int split_cells(const Line *L, int *cs, int *ce, int max) {
+    int i = 0, n = 0;
+    while (i < L->len && (L->s[i] == ' ' || L->s[i] == '\t')) i++;
+    if (i < L->len && L->s[i] == '|') i++;
+    while (i < L->len && n < max) {
+        int st = i;
+        while (i < L->len && !(L->s[i] == '|' && (i == st || L->s[i - 1] != '\\'))) i++;
+        int a = st, b = i;
+        while (a < b && (L->s[a] == ' ' || L->s[a] == '\t')) a++;
+        while (b > a && (L->s[b - 1] == ' ' || L->s[b - 1] == '\t')) b--;
+        if (i >= L->len && a == b) break;
+        cs[n] = a; ce[n] = b; n++;
+        i++;
+    }
+    return n;
+}
+
+static int is_sep_row(const Line *L) {
+    int cs[32], ce[32], n = split_cells(L, cs, ce, 32);
+    if (n == 0) return 0;
+    for (int c = 0; c < n; c++) {
+        int dash = 0;
+        if (ce[c] == cs[c]) return 0;
+        for (int i = cs[c]; i < ce[c]; i++) {
+            if (L->s[i] == '-') dash++;
+            else if (L->s[i] != ':') return 0;
+        }
+        if (!dash) return 0;
+    }
+    return 1;
+}
+
+static int is_tbl_line(int r) { return hl_state_get(r) == ST_NONE && is_pipe_row(&E.l[r]); }
+
+static int table_block(int r, int *st, int *en) {
+    if (!is_tbl_line(r)) return 0;
+    int a = r, b = r;
+    while (a > 0 && r - a < 200 && is_tbl_line(a - 1)) a--;
+    while (b + 1 < E.n && b - r < 200 && is_tbl_line(b + 1)) b++;
+    if (b < a + 1 || !is_sep_row(&E.l[a + 1])) return 0;
+    *st = a; *en = b;
+    return 1;
+}
+
+static uint8_t *tc; static int tc_cap;
+static uint8_t *tc_for(int n) {
+    if (n + 1 > tc_cap) { tc_cap = n + 256; tc = xrealloc(tc, tc_cap); }
+    return tc;
+}
+
+static int vis_width(const char *s, int a, int b, const uint8_t *cls) {
+    int w = 0;
+    for (int i = a; i < b;) {
+        int cp; int n = u8dec(s + i, b - i, &cp);
+        if (!(cls[i] & F_HID)) w += cp < 0 ? 1 : cp == '\t' ? TABW : cpwidth(cp);
+        i += n;
+    }
+    return w;
+}
+
+static void build_table(int r, int a, int b, View *v) {
+    int cs[32], ce[32], w[32] = {0}, al[32] = {0}, ncols = 0;
+    for (int rr = a; rr <= b; rr++) {
+        int n = split_cells(&E.l[rr], cs, ce, 32);
+        if (n > ncols) ncols = n;
+    }
+    { /* alignment from the separator row */
+        Line *S = &E.l[a + 1];
+        int n = split_cells(S, cs, ce, 32);
+        for (int c = 0; c < n; c++) {
+            int l = S->s[cs[c]] == ':', rt = S->s[ce[c] - 1] == ':';
+            al[c] = l && rt ? 1 : rt ? 2 : 0;
+        }
+    }
+    for (int rr = a; rr <= b; rr++) {
+        if (rr == a + 1) continue;
+        Line *L = &E.l[rr];
+        int n = split_cells(L, cs, ce, 32);
+        uint8_t *cl = tc_for(L->len);
+        for (int c = 0; c < n; c++) {
+            paint(cl, cs[c], ce[c], rr == a ? C_BOLD : C_NONE);
+            md_inline(L->s, cs[c], ce[c], cl);
+            int cw = vis_width(L->s, cs[c], ce[c], cl);
+            if (cw > w[c]) w[c] = cw;
+        }
+    }
+    for (int c = 0; c < ncols; c++) if (w[c] < 3) w[c] = 3;
+    Line *L = &E.l[r];
+    Bld bl = {0};
+    if (r == a + 1) {
+        bld_put(&bl, "├", 3, 0, C_HR);
+        for (int c = 0; c < ncols; c++) {
+            for (int k = 0; k < w[c] + 2; k++) bld_put(&bl, "─", 3, 0, C_HR);
+            bld_put(&bl, c + 1 < ncols ? "┼" : "┤", 3, 0, C_HR);
+        }
+    } else {
+        int n = split_cells(L, cs, ce, 32);
+        uint8_t *cl = tc_for(L->len);
+        bld_put(&bl, "│", 3, 0, C_HR);
+        for (int c = 0; c < ncols; c++) {
+            int src = c < n ? cs[c] : L->len, cw = 0;
+            if (c < n) {
+                paint(cl, cs[c], ce[c], r == a ? C_BOLD : C_NONE);
+                md_inline(L->s, cs[c], ce[c], cl);
+                cw = vis_width(L->s, cs[c], ce[c], cl);
+            }
+            int pad = w[c] - cw, left = al[c] == 2 ? pad : al[c] == 1 ? pad / 2 : 0;
+            for (int k = 0; k < left + 1; k++) bld_put(&bl, " ", 1, src, C_NONE);
+            if (c < n) bld_span(&bl, L->s, cs[c], ce[c], cl);
+            for (int k = 0; k < pad - left + 1; k++) bld_put(&bl, " ", 1, src, C_NONE);
+            bld_put(&bl, "│", 3, src, C_HR);
+        }
+    }
+    bld_finish(&bl, L->len, v);
+}
+
+static int line_is_raw(int r) {
+    if (r == E.cur.r) return 1;
+    if (has_sel()) {
+        Pos a, b; sel_range(&a, &b);
+        if (r >= a.r && r <= b.r) return 1;
+    }
+    return 0;
+}
+
+/* The text to lay out and draw for line r: the line itself, or a concealed View
+ * (v must start zeroed and be released with view_free). */
+static const Line *dline(int r, View *v) {
+    Line *L = &E.l[r];
+    if (!conceal_on || hl_lang != L_MD || L->len == 0 || L->len > 4000 || line_is_raw(r)) return L;
+    int a, b;
+    if (table_block(r, &a, &b)) { build_table(r, a, b, v); return &v->L; }
+    uint8_t *cl = tc_for(L->len);
+    scan_md(L->s, L->len, hl_state_get(r), cl);
+    Bld bl = {0};
+    if ((cl[0] & C_MASK) == C_HR) {
+        for (int k = 0; k < wrapw(); k++) bld_put(&bl, "─", 3, 0, C_HR);
+    } else bld_span(&bl, L->s, 0, L->len, cl);
+    bld_finish(&bl, L->len, v);
+    return &v->L;
 }
 
 /* End byte (exclusive) of the visual row starting at byte s. */
@@ -1075,13 +1297,20 @@ static int c_from_rcol(const Line *L, int s, int e, int col) {
     return (e < L->len && e > s) ? prev_c(L, e) : e;
 }
 
+static int nrows_of(int r) {
+    View vw = {0};
+    int n = line_nrows(dline(r, &vw));
+    view_free(&vw);
+    return n;
+}
+
 static int vrow_step(VRow *v, int d) {
     if (d > 0) {
-        if (v->sub + 1 < line_nrows(&E.l[v->r])) { v->sub++; return 1; }
+        if (v->sub + 1 < nrows_of(v->r)) { v->sub++; return 1; }
         if (v->r + 1 < E.n) { v->r++; v->sub = 0; return 1; }
     } else {
         if (v->sub > 0) { v->sub--; return 1; }
-        if (v->r > 0) { v->r--; v->sub = line_nrows(&E.l[v->r]) - 1; return 1; }
+        if (v->r > 0) { v->r--; v->sub = nrows_of(v->r) - 1; return 1; }
     }
     return 0;
 }
@@ -1097,7 +1326,7 @@ static VRow top_vrow(void) {
     VRow t = { E.top, E.topsub };
     if (t.r >= E.n) t.r = E.n - 1;
     if (t.r < 0) t.r = 0;
-    int nr = line_nrows(&E.l[t.r]);
+    int nr = nrows_of(t.r);
     if (t.sub >= nr) t.sub = nr - 1;
     if (t.sub < 0) t.sub = 0;
     return t;
@@ -1151,19 +1380,17 @@ static void scroll_view(int n) {
 }
 
 /* Draw bytes [s,e) of line r (one visual row). */
-static void draw_text_row(Abuf *ab, int r, int s, int e) {
-    Line *L = &E.l[r];
-    Pos a, b; int hs = has_sel();
+static void draw_text_row(Abuf *ab, int r, int s, int e, const Line *L, const uint8_t *cls) {
+    Pos a, b; int hs = has_sel() && L == &E.l[r];
     if (hs) sel_range(&a, &b);
     int vc = 0, cur_cls = C_NONE;
-    const uint8_t *cls = hl_line(r);
     #define SETCLS(c) do { int c_ = (c); if (c_ != cur_cls) { ab_str(ab, "\x1b[m"); if (c_ != C_NONE) { ab_str(ab, "\x1b["); ab_str(ab, class_sgr[c_]); ab_str(ab, "m"); } cur_cls = c_; } } while (0)
     for (int i = s; i < e;) {
         int cp; int n = u8dec(L->s + i, L->len - i, &cp);
         int w = cp == '\t' ? TABW - vc % TABW : (cp < 0 ? 1 : cpwidth(cp));
         int sel = 0;
         if (hs) { Pos p = { r, i }; sel = pos_cmp(p, a) >= 0 && pos_cmp(p, b) < 0; }
-        SETCLS(sel ? C_SEL : (cls ? cls[i] : C_NONE));
+        SETCLS(sel ? C_SEL : (cls ? cls[i] & C_MASK : C_NONE));
         if (cp == '\t') { for (int k = 0; k < w; k++) ab_str(ab, " "); }
         else if (cp < 0 || cp < 32 || cp == 127) ab_str(ab, "?");
         else ab_add(ab, L->s + i, n);
@@ -1187,14 +1414,16 @@ static void draw(void) {
     int more = 1;
     for (int y = 0; y < th; y++) {
         if (more) {
-            Line *L = &E.l[v.r];
+            View vw = {0};
+            const Line *L = dline(v.r, &vw);
             int s, e;
             row_bounds(L, v.sub, &s, &e);
             if (v.sub == 0)
                 ab_fmt(&ab, v.r == E.cur.r ? "\x1b[38;5;250m%*d \x1b[m" : "\x1b[38;5;240m%*d \x1b[m", gw - 1, v.r + 1);
             else
                 ab_fmt(&ab, "%*s", gw, "");
-            draw_text_row(&ab, v.r, s, e);
+            draw_text_row(&ab, v.r, s, e, L, vw.on ? vw.cls : hl_line(v.r));
+            view_free(&vw);
             more = vrow_step(&v, 1);
         } else {
             ab_str(&ab, "\x1b[38;5;240m~\x1b[m\x1b[K");
@@ -1764,6 +1993,7 @@ static void show_help(void) {
         "           Ctrl+D duplicate line/selection",
         "           Tab / Shift+Tab indent / unindent",
         "Search     Ctrl+F find          F3 / Shift+F3 next / prev",
+        "Markdown   F4 toggles the live preview (cursor line stays raw)",
         "",
         "Press any key to return.",
     };
@@ -1785,12 +2015,15 @@ static void show_help(void) {
 static Pos screen_to_pos(int x, int y) {
     VRow v = top_vrow();
     for (int i = 0; i < y - 1; i++) if (!vrow_step(&v, 1)) break;
-    Line *L = &E.l[v.r];
+    View vw = {0};
+    const Line *L = dline(v.r, &vw);
     int rs, re;
     row_bounds(L, v.sub, &rs, &re);
     int col = x - 1 - gutter_w();
     if (col < 0) col = 0;
-    Pos p = { v.r, c_from_rcol(L, rs, re, col) };
+    int c = c_from_rcol(L, rs, re, col);
+    Pos p = { v.r, vw.on ? vw.map[c] : c };
+    view_free(&vw);
     return p;
 }
 
@@ -1842,6 +2075,10 @@ static void process_key(int key) {
     case K_F1: show_help(); return;
     case K_F2: do_save(1); return;
     case K_F3: find_next(!shift); return;
+    case K_F4:
+        conceal_on = !conceal_on;
+        set_msg("Live markdown preview %s", conceal_on ? "on" : "off");
+        return;
     case K_MOUSE: handle_mouse(); return;
     case K_PASTE: insert_text(paste_buf, paste_len, 0); return;
     case K_RESIZE: return;
