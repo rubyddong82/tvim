@@ -8,6 +8,8 @@
 #include <errno.h>
 #include <signal.h>
 #include <stdarg.h>
+#include <stdint.h>
+#include <strings.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -53,7 +55,7 @@ static struct {
     Line *l; int n, cap;
     Pos cur, anc; int sel;
     int want, want_keep;
-    int top, left, rows, cols;
+    int top, topsub, rows, cols; /* first visible logical line + wrapped row within it */
     char *file; int dirty, crlf, final_nl;
     char msg[512]; time_t msgt;
     char *clip; size_t cliplen; int cliplines;
@@ -66,6 +68,8 @@ static struct {
 } E;
 
 static volatile sig_atomic_t g_resize, g_term;
+static int hl_valid; /* syntax highlight cache (see below) */
+static void hl_invalidate(int r);
 
 /* mouse + paste state filled in by read_key() */
 static int mouse_b, mouse_x, mouse_y, mouse_release;
@@ -165,17 +169,6 @@ static int col_of(const Line *L, int c) {
         i += n;
     }
     return vc;
-}
-
-static int c_from_col(const Line *L, int col) {
-    int vc = 0, i = 0;
-    while (i < L->len) {
-        int cp; int n = u8dec(L->s + i, L->len - i, &cp);
-        int w = cp == '\t' ? TABW - vc % TABW : (cp < 0 ? 1 : cpwidth(cp));
-        if (vc + w > col) return i;
-        vc += w; i += n;
-    }
-    return L->len;
 }
 
 /* ---------- buffer primitives ---------- */
@@ -298,6 +291,7 @@ static void snap_restore(Snap *s) {
     E.l = s->l; E.n = E.cap = s->n;
     s->l = NULL; s->n = 0;
     E.cur = s->cur; E.anc = s->anc; E.sel = s->sel;
+    hl_valid = 0;
 }
 static void stack_push(Snap **st, int *n) {
     if (*n >= MAX_UNDO) {
@@ -322,6 +316,7 @@ static void undo_begin(int kind) {
     E.dirty = 1;
     E.lastedit = time(NULL);
     E.quit_warn = 0;
+    hl_invalidate((E.sel && E.anc.r < E.cur.r ? E.anc.r : E.cur.r) - 1);
 }
 
 static void do_undo(void) {
@@ -607,6 +602,408 @@ static int save_file(void) {
     return 0;
 }
 
+/* ---------- syntax highlighting ---------- */
+
+enum { C_NONE, C_KEYWORD, C_TYPE, C_STRING, C_NUMBER, C_COMMENT, C_FUNC, C_TAG, C_ATTR,
+       C_HEAD, C_BOLD, C_ITALIC, C_CODE, C_LINK, C_URL, C_MARK, C_QUOTE, C_HR, C_DONE, C_SEL };
+
+/* The markdown colours follow the notes editor on the download site: bold in pink-red,
+ * headings bold in the neon green accent, green underlined links, dim struck-through done items. */
+static const char *const class_sgr[] = {
+    [C_NONE] = "", [C_KEYWORD] = "38;5;176", [C_TYPE] = "38;5;80", [C_STRING] = "38;5;114",
+    [C_NUMBER] = "38;5;215", [C_COMMENT] = "38;5;243", [C_FUNC] = "38;5;111",
+    [C_TAG] = "38;5;75", [C_ATTR] = "38;5;180",
+    [C_HEAD] = "1;38;5;83", [C_BOLD] = "1;38;5;217", [C_ITALIC] = "3;38;5;253",
+    [C_CODE] = "38;5;150;48;5;236", [C_LINK] = "4;38;5;72", [C_URL] = "38;5;243",
+    [C_MARK] = "38;5;83", [C_QUOTE] = "3;38;5;108", [C_HR] = "38;5;243", [C_DONE] = "2;9",
+    [C_SEL] = "48;5;24;38;5;255",
+};
+
+enum { L_NONE, L_MD, L_C, L_JS, L_PY, L_JSON, L_HTML, L_CSS, L_SH };
+enum { ST_NONE, ST_BLOCK, ST_TQ1, ST_TQ2, ST_BT, ST_FENCE, ST_HCOMMENT, ST_HTAG, ST_HTAG_SCRIPT,
+       ST_HTAG_STYLE, ST_SCRIPT, ST_STYLE };
+
+typedef struct {
+    const char *lc, *bo, *bc, *quotes;
+    const char *const *kw, *const *ty;
+    int triple, backtick, preproc, json, shell, css, func;
+} Lang;
+
+static const char *const kw_c[] = { "if", "else", "for", "while", "do", "switch", "case", "default", "break",
+    "continue", "return", "goto", "sizeof", "typedef", "struct", "union", "enum", "static", "extern", "const",
+    "volatile", "inline", "register", "NULL", "true", "false", "class", "public", "private", "protected",
+    "namespace", "template", "typename", "new", "delete", "using", "nullptr", "auto", "this", "virtual",
+    "try", "catch", "throw", NULL };
+static const char *const ty_c[] = { "int", "char", "short", "long", "unsigned", "signed", "float", "double",
+    "void", "size_t", "ssize_t", "bool", "uint8_t", "uint16_t", "uint32_t", "uint64_t", "int8_t", "int16_t",
+    "int32_t", "int64_t", "FILE", NULL };
+static const char *const kw_js[] = { "var", "let", "const", "function", "return", "if", "else", "for", "while",
+    "do", "switch", "case", "default", "break", "continue", "new", "delete", "typeof", "instanceof", "in", "of",
+    "class", "extends", "super", "import", "export", "from", "as", "async", "await", "yield", "try", "catch",
+    "finally", "throw", "this", "null", "undefined", "true", "false", "void", "static", "get", "set",
+    "interface", "type", "enum", "implements", "public", "private", "readonly", NULL };
+static const char *const kw_py[] = { "def", "class", "return", "if", "elif", "else", "for", "while", "in", "not",
+    "and", "or", "is", "import", "from", "as", "with", "try", "except", "finally", "raise", "pass", "break",
+    "continue", "lambda", "yield", "global", "nonlocal", "assert", "del", "None", "True", "False", "async",
+    "await", NULL };
+static const char *const ty_py[] = { "print", "len", "range", "int", "str", "float", "list", "dict", "set",
+    "tuple", "bool", "open", "isinstance", "self", "super", "enumerate", "zip", "map", "sorted", NULL };
+static const char *const kw_sh[] = { "if", "then", "else", "elif", "fi", "for", "while", "until", "do", "done",
+    "case", "esac", "function", "in", "return", "exit", "export", "local", "readonly", "echo", "cd", "source",
+    "set", "unset", "shift", "true", "false", NULL };
+static const char *const kw_json[] = { "true", "false", "null", NULL };
+
+static const Lang lang_c = { "//", "/*", "*/", "\"'", kw_c, ty_c, 0, 0, 1, 0, 0, 0, 1 };
+static const Lang lang_js = { "//", "/*", "*/", "\"'", kw_js, NULL, 0, 1, 0, 0, 0, 0, 1 };
+static const Lang lang_py = { "#", NULL, NULL, "\"'", kw_py, ty_py, 1, 0, 0, 0, 0, 0, 1 };
+static const Lang lang_json = { NULL, NULL, NULL, "\"", kw_json, NULL, 0, 0, 0, 1, 0, 0, 0 };
+static const Lang lang_sh = { "#", NULL, NULL, "\"'", kw_sh, NULL, 0, 0, 0, 0, 1, 0, 0 };
+static const Lang lang_css = { NULL, "/*", "*/", "\"'", NULL, NULL, 0, 0, 0, 0, 0, 1, 0 };
+
+static int in_list(const char *const *l, const char *s, int n) {
+    for (; l && *l; l++) if ((int)strlen(*l) == n && memcmp(*l, s, n) == 0) return 1;
+    return 0;
+}
+static int id_start(int c) { return isalpha(c) || c == '_' || c == '$' || c >= 0x80; }
+static int id_char(int c) { return isalnum(c) || c == '_' || c == '$' || c >= 0x80; }
+static void paint(uint8_t *cls, int a, int b, int c) { for (int i = a; i < b; i++) cls[i] = c; }
+static const char *find_str(const char *s, int n, int from, const char *t) {
+    int tl = (int)strlen(t);
+    for (int i = from; i + tl <= n; i++) if (memcmp(s + i, t, tl) == 0) return s + i;
+    return NULL;
+}
+
+/* Scan one line of a C-like language. Returns the state at the end of the line. */
+static int scan_code(const Lang *g, const char *s, int n, int st, uint8_t *cls) {
+    int i = 0;
+    paint(cls, 0, n, C_NONE);
+    for (;;) {
+        if (st == ST_BLOCK) {
+            const char *e = find_str(s, n, i, g->bc);
+            int end = e ? (int)(e - s) + (int)strlen(g->bc) : n;
+            paint(cls, i, end, C_COMMENT); i = end;
+            if (e) st = ST_NONE;
+            if (!e) return st;
+        } else if (st == ST_TQ1 || st == ST_TQ2) {
+            const char *e = find_str(s, n, i, st == ST_TQ1 ? "'''" : "\"\"\"");
+            int end = e ? (int)(e - s) + 3 : n;
+            paint(cls, i, end, C_STRING); i = end;
+            if (e) st = ST_NONE; else return st;
+        } else if (st == ST_BT) {
+            int j = i;
+            while (j < n && s[j] != '`') j += s[j] == '\\' ? 2 : 1;
+            if (j > n) j = n;
+            int end = j < n ? j + 1 : n;
+            paint(cls, i, end, C_STRING); i = end;
+            if (j < n) st = ST_NONE; else return st;
+        }
+        break;
+    }
+    int first = 1; /* nothing but spaces seen yet */
+    while (i < n) {
+        unsigned char c = s[i];
+        if (c == ' ' || c == '\t') { i++; continue; }
+        int was_first = first; first = 0;
+        if (g->lc && strncmp(s + i, g->lc, strlen(g->lc)) == 0 &&
+            (!g->shell || i == 0 || s[i - 1] == ' ' || s[i - 1] == '\t' || was_first)) {
+            paint(cls, i, n, C_COMMENT); return st;
+        }
+        if (g->bo && strncmp(s + i, g->bo, strlen(g->bo)) == 0) {
+            const char *e = find_str(s, n, i + (int)strlen(g->bo), g->bc);
+            int end = e ? (int)(e - s) + (int)strlen(g->bc) : n;
+            paint(cls, i, end, C_COMMENT); i = end;
+            if (!e) return ST_BLOCK;
+            continue;
+        }
+        if (g->preproc && c == '#' && was_first) {
+            int j = i + 1;
+            while (j < n && (s[j] == ' ' || s[j] == '\t')) j++;
+            int k = j;
+            while (k < n && isalpha((unsigned char)s[k])) k++;
+            paint(cls, i, k, C_KEYWORD);
+            int isinc = k - j == 7 && memcmp(s + j, "include", 7) == 0;
+            i = k;
+            while (isinc && i < n && s[i] == ' ') i++;
+            if (isinc && i < n && s[i] == '<') {
+                int e = i; while (e < n && s[e] != '>') e++;
+                if (e < n) e++;
+                paint(cls, i, e, C_STRING); i = e;
+            }
+            continue;
+        }
+        if (g->quotes && strchr(g->quotes, c)) {
+            if (g->triple && i + 2 < n && s[i + 1] == c && s[i + 2] == c) {
+                st = c == '\'' ? ST_TQ1 : ST_TQ2;
+                const char *e = find_str(s, n, i + 3, c == '\'' ? "'''" : "\"\"\"");
+                int end = e ? (int)(e - s) + 3 : n;
+                paint(cls, i, end, C_STRING); i = end;
+                if (e) st = ST_NONE; else return st;
+                continue;
+            }
+            int j = i + 1;
+            while (j < n && s[j] != c) j += s[j] == '\\' ? 2 : 1;
+            if (j > n) j = n;
+            int end = j < n ? j + 1 : n, kind = C_STRING;
+            if (g->json) {
+                int k = end;
+                while (k < n && (s[k] == ' ' || s[k] == '\t')) k++;
+                if (k < n && s[k] == ':') kind = C_ATTR;
+            }
+            paint(cls, i, end, kind); i = end;
+            continue;
+        }
+        if (g->backtick && c == '`') {
+            int j = i + 1;
+            while (j < n && s[j] != '`') j += s[j] == '\\' ? 2 : 1;
+            if (j > n) j = n;
+            int end = j < n ? j + 1 : n;
+            paint(cls, i, end, C_STRING); i = end;
+            if (j >= n) return ST_BT;
+            continue;
+        }
+        if (g->shell && c == '$') {
+            int j = i + 1;
+            if (j < n && s[j] == '{') { while (j < n && s[j] != '}') j++; if (j < n) j++; }
+            else if (j < n && (id_start(s[j]) || isdigit((unsigned char)s[j]) || strchr("?@*#!$", s[j]))) {
+                j++; while (j < n && id_char(s[j])) j++;
+            }
+            paint(cls, i, j, C_ATTR); i = j > i ? j : i + 1;
+            continue;
+        }
+        if (g->css && c == '#') {
+            int j = i + 1;
+            while (j < n && isxdigit((unsigned char)s[j])) j++;
+            if (j - i >= 4) { paint(cls, i, j, C_NUMBER); i = j; continue; }
+        }
+        if ((c == '@' && (g->css || (g->triple && was_first)))) {
+            int j = i + 1;
+            while (j < n && (id_char(s[j]) || s[j] == '-' || s[j] == '.')) j++;
+            paint(cls, i, j, g->css ? C_KEYWORD : C_FUNC); i = j;
+            continue;
+        }
+        if (isdigit(c) || (c == '.' && i + 1 < n && isdigit((unsigned char)s[i + 1]))) {
+            int j = i + 1;
+            while (j < n && (isalnum((unsigned char)s[j]) || s[j] == '.' || s[j] == '_' || (g->css && s[j] == '%'))) j++;
+            paint(cls, i, j, C_NUMBER); i = j;
+            continue;
+        }
+        if (id_start(c) || (g->css && c == '-' && i + 1 < n && isalpha((unsigned char)s[i + 1]))) {
+            int j = i + 1;
+            while (j < n && (id_char(s[j]) || (g->css && s[j] == '-'))) j++;
+            int k = j;
+            while (k < n && s[k] == ' ') k++;
+            if (in_list(g->kw, s + i, j - i)) paint(cls, i, j, C_KEYWORD);
+            else if (in_list(g->ty, s + i, j - i)) paint(cls, i, j, C_TYPE);
+            else if (g->func && k < n && s[k] == '(') paint(cls, i, j, C_FUNC);
+            i = j;
+            continue;
+        }
+        i++;
+    }
+    return st;
+}
+
+static int scan_html(const char *s, int n, int st, uint8_t *cls) {
+    int i = 0;
+    paint(cls, 0, n, C_NONE);
+    while (i < n) {
+        if (st == ST_HCOMMENT) {
+            const char *e = find_str(s, n, i, "-->");
+            int end = e ? (int)(e - s) + 3 : n;
+            paint(cls, i, end, C_COMMENT); i = end;
+            if (e) st = ST_NONE;
+        } else if (st == ST_SCRIPT || st == ST_STYLE) {
+            const char *close = st == ST_SCRIPT ? "</script" : "</style";
+            int cl = (int)strlen(close), j = i;
+            while (j + cl <= n && strncasecmp(s + j, close, cl) != 0) j++;
+            if (j + cl > n) j = n;
+            scan_code(st == ST_SCRIPT ? &lang_js : &lang_css, s + i, j - i, ST_NONE, cls + i);
+            i = j;
+            if (j < n) st = ST_NONE;
+        } else if (st == ST_HTAG || st == ST_HTAG_SCRIPT || st == ST_HTAG_STYLE) {
+            unsigned char c = s[i];
+            if (c == '>') {
+                cls[i++] = C_TAG;
+                st = st == ST_HTAG_SCRIPT ? ST_SCRIPT : st == ST_HTAG_STYLE ? ST_STYLE : ST_NONE;
+            } else if (c == '"' || c == '\'') {
+                int j = i + 1;
+                while (j < n && s[j] != c) j++;
+                int end = j < n ? j + 1 : n;
+                paint(cls, i, end, C_STRING); i = end;
+            } else if (id_char(c) || c == '-' || c == ':') {
+                int j = i;
+                while (j < n && (id_char(s[j]) || s[j] == '-' || s[j] == ':')) j++;
+                paint(cls, i, j, C_ATTR); i = j;
+            } else { if (c == '/' || c == '=') cls[i] = C_TAG; i++; }
+        } else if (s[i] == '<') {
+            if (strncmp(s + i, "<!--", 4) == 0) { st = ST_HCOMMENT; paint(cls, i, i + 4, C_COMMENT); i += 4; continue; }
+            int j = i + 1, closing = 0;
+            if (j < n && s[j] == '/') { closing = 1; j++; }
+            if (j < n && s[j] == '!') j++;
+            if (j < n && isalpha((unsigned char)s[j])) {
+                int k = j;
+                while (k < n && (isalnum((unsigned char)s[k]) || s[k] == '-' || s[k] == ':')) k++;
+                paint(cls, i, k, C_TAG);
+                st = ST_HTAG;
+                if (!closing && k - j == 6 && strncasecmp(s + j, "script", 6) == 0) st = ST_HTAG_SCRIPT;
+                if (!closing && k - j == 5 && strncasecmp(s + j, "style", 5) == 0) st = ST_HTAG_STYLE;
+                i = k;
+            } else if (j > i + 1 && j <= n) { /* <!DOCTYPE ... */
+                paint(cls, i, j, C_TAG); i = j; st = ST_HTAG;
+            } else i++;
+        } else if (s[i] == '&') {
+            int j = i + 1;
+            while (j < n && isalnum((unsigned char)s[j])) j++;
+            if (j < n && s[j] == ';') { paint(cls, i, j + 1, C_NUMBER); i = j + 1; } else i++;
+        } else i++;
+    }
+    return st;
+}
+
+/* Inline markdown over s[a,b): bold, italic, code, links, bare URLs. */
+static void md_inline(const char *s, int a, int b, uint8_t *cls) {
+    for (int i = a; i < b;) {
+        char c = s[i];
+        if (c == '\\' && i + 1 < b) { i += 2; continue; }
+        if (c == '`') {
+            const char *e = find_str(s, b, i + 1, "`");
+            if (e) { int end = (int)(e - s) + 1; paint(cls, i, end, C_CODE); i = end; continue; }
+        } else if ((c == '*' || c == '_') && i + 1 < b && s[i + 1] == c) {
+            char t[3] = { c, c, 0 };
+            const char *e = find_str(s, b, i + 2, t);
+            if (e && (int)(e - s) > i + 2 && (c == '*' || i == a || !id_char(s[i - 1]))) {
+                int end = (int)(e - s) + 2; paint(cls, i, end, C_BOLD); i = end; continue;
+            }
+        } else if (c == '*' && i + 1 < b && s[i + 1] != ' ') {
+            const char *e = find_str(s, b, i + 1, "*");
+            if (e && (int)(e - s) > i + 1) { int end = (int)(e - s) + 1; paint(cls, i, end, C_ITALIC); i = end; continue; }
+        } else if (c == '[' || (c == '!' && i + 1 < b && s[i + 1] == '[')) {
+            int o = c == '!' ? i + 1 : i;
+            const char *cb = find_str(s, b, o + 1, "](");
+            if (cb) {
+                int mid = (int)(cb - s);
+                const char *cp = find_str(s, b, mid + 2, ")");
+                if (cp) {
+                    int end = (int)(cp - s) + 1;
+                    paint(cls, i, mid + 1, C_LINK);
+                    paint(cls, mid + 1, end, C_URL);
+                    i = end; continue;
+                }
+            }
+        } else if (c == 'h' && (strncmp(s + i, "http://", i + 7 <= b ? 7 : 0) == 0 || strncmp(s + i, "https://", i + 8 <= b ? 8 : 0) == 0)
+                   && i + 7 <= b) {
+            int j = i;
+            while (j < b && s[j] != ' ' && s[j] != '\t' && s[j] != ')' && s[j] != '>') j++;
+            paint(cls, i, j, C_LINK); i = j; continue;
+        }
+        i++;
+    }
+}
+
+static int scan_md(const char *s, int n, int st, uint8_t *cls) {
+    paint(cls, 0, n, C_NONE);
+    int i = 0;
+    while (i < n && i < 3 && s[i] == ' ') i++;
+    int fence = n - i >= 3 && (memcmp(s + i, "```", 3) == 0 || memcmp(s + i, "~~~", 3) == 0);
+    if (st == ST_FENCE) {
+        paint(cls, 0, n, C_CODE);
+        return fence ? ST_NONE : ST_FENCE;
+    }
+    if (fence) { paint(cls, 0, n, C_CODE); return ST_FENCE; }
+    int j = 0;
+    while (j < n && (s[j] == ' ' || s[j] == '\t')) j++;
+    /* horizontal rule */
+    if (j < n && (s[j] == '-' || s[j] == '*' || s[j] == '_')) {
+        int k = j, cnt = 0;
+        while (k < n && s[k] == s[j]) { k++; cnt++; }
+        while (k < n && s[k] == ' ') k++;
+        if (cnt >= 3 && k == n) { paint(cls, 0, n, C_HR); return st; }
+    }
+    int base = C_NONE, body = j;
+    if (j < n && s[j] == '#') {
+        int k = j; while (k < n && s[k] == '#') k++;
+        if (k - j <= 6 && (k == n || s[k] == ' ')) { base = C_HEAD; paint(cls, 0, n, C_HEAD); }
+    } else if (j < n && s[j] == '>') {
+        paint(cls, j, j + 1, C_MARK);
+        base = C_QUOTE; body = j + 1;
+        paint(cls, body, n, C_QUOTE);
+    } else {
+        int k = j;
+        if (k < n && (s[k] == '-' || s[k] == '*' || s[k] == '+') && k + 1 < n && s[k + 1] == ' ') k++;
+        else { while (k < n && isdigit((unsigned char)s[k])) k++; if (k > j && k + 1 < n && (s[k] == '.' || s[k] == ')') && s[k + 1] == ' ') k++; else k = j; }
+        if (k > j) {
+            paint(cls, j, k, C_MARK);
+            body = k;
+            while (body < n && s[body] == ' ') body++;
+            if (n - body >= 3 && s[body] == '[' && s[body + 2] == ']' && (s[body + 1] == ' ' || s[body + 1] == 'x' || s[body + 1] == 'X')) {
+                paint(cls, body, body + 3, C_MARK);
+                if (s[body + 1] != ' ') { base = C_DONE; paint(cls, body + 3, n, C_DONE); }
+                body += 3;
+            }
+        }
+    }
+    if (base != C_DONE) md_inline(s, body, n, cls);
+    return st;
+}
+
+static uint8_t *hl_state; /* hl_state[r] = scanner state at the start of line r */
+static int hl_cap, hl_lang = L_NONE;
+static uint8_t *hl_cls; static int hl_clscap;
+
+static void hl_invalidate(int r) { if (r < 0) r = 0; if (r < hl_valid) hl_valid = r; }
+
+static int hl_scan_line(int r, int st, uint8_t *cls) {
+    Line *L = &E.l[r];
+    if (L->len > 4000) { memset(cls, C_NONE, L->len); return st; }
+    switch (hl_lang) {
+    case L_MD: return scan_md(L->s, L->len, st, cls);
+    case L_HTML: return scan_html(L->s, L->len, st, cls);
+    case L_C: return scan_code(&lang_c, L->s, L->len, st, cls);
+    case L_JS: return scan_code(&lang_js, L->s, L->len, st, cls);
+    case L_PY: return scan_code(&lang_py, L->s, L->len, st, cls);
+    case L_JSON: return scan_code(&lang_json, L->s, L->len, st, cls);
+    case L_CSS: return scan_code(&lang_css, L->s, L->len, st, cls);
+    case L_SH: return scan_code(&lang_sh, L->s, L->len, st, cls);
+    }
+    memset(cls, C_NONE, L->len);
+    return st;
+}
+
+/* Colour classes for line r (valid until the next call), or NULL when not highlighting. */
+static const uint8_t *hl_line(int r) {
+    if (hl_lang == L_NONE) return NULL;
+    if (hl_cap < E.n + 1) { hl_cap = E.n + 64; hl_state = xrealloc(hl_state, hl_cap); }
+    if (hl_valid > E.n) hl_valid = E.n;
+    if (E.l[r].len + 1 > hl_clscap) { hl_clscap = E.l[r].len + 256; hl_cls = xrealloc(hl_cls, hl_clscap); }
+    if (hl_valid == 0) hl_state[0] = ST_NONE;
+    while (hl_valid < r) {
+        Line *P = &E.l[hl_valid];
+        if (P->len > hl_clscap) { hl_clscap = P->len + 256; hl_cls = xrealloc(hl_cls, hl_clscap); }
+        hl_state[hl_valid + 1] = hl_scan_line(hl_valid, hl_state[hl_valid], hl_cls);
+        hl_valid++;
+    }
+    hl_scan_line(r, hl_state[r], hl_cls);
+    return hl_cls;
+}
+
+static void detect_lang(void) {
+    hl_lang = L_NONE; hl_valid = 0;
+    if (!E.file) return;
+    const char *b = strrchr(E.file, '/'); b = b ? b + 1 : E.file;
+    const char *dot = strrchr(b, '.');
+    char ext[16] = "";
+    if (dot && strlen(dot + 1) < sizeof ext) { for (int i = 0; dot[1 + i]; i++) ext[i] = tolower((unsigned char)dot[1 + i]); }
+    static const struct { const char *e; int l; } map[] = {
+        {"md", L_MD}, {"markdown", L_MD}, {"c", L_C}, {"h", L_C}, {"cc", L_C}, {"cpp", L_C}, {"hpp", L_C},
+        {"js", L_JS}, {"mjs", L_JS}, {"cjs", L_JS}, {"jsx", L_JS}, {"ts", L_JS}, {"tsx", L_JS},
+        {"py", L_PY}, {"json", L_JSON}, {"html", L_HTML}, {"htm", L_HTML}, {"xml", L_HTML}, {"svg", L_HTML},
+        {"css", L_CSS}, {"sh", L_SH}, {"bash", L_SH}, {"zsh", L_SH}, {"yml", L_SH}, {"yaml", L_SH},
+        {"toml", L_SH}, {"conf", L_SH}, {"ini", L_SH}, {"mk", L_SH},
+    };
+    if (ext[0]) for (size_t i = 0; i < sizeof map / sizeof *map; i++) if (!strcmp(map[i].e, ext)) hl_lang = map[i].l;
+    if (!strcmp(b, "Makefile") || !strcmp(b, "makefile") || !strcmp(b, ".bashrc") || !strcmp(b, ".gitignore")) hl_lang = L_SH;
+}
+
 /* ---------- drawing ---------- */
 
 static int gutter_w(void) {
@@ -615,65 +1012,190 @@ static int gutter_w(void) {
     return d + 2;
 }
 
-static void scroll(void) {
-    int th = E.rows - 2;
-    int tw = E.cols - gutter_w();
-    if (tw < 1) tw = 1;
-    if (E.cur.r < E.top) E.top = E.cur.r;
-    if (E.cur.r >= E.top + th) E.top = E.cur.r - th + 1;
-    int vc = col_of(&E.l[E.cur.r], E.cur.c);
-    if (vc < E.left) E.left = vc;
-    if (vc >= E.left + tw) E.left = vc - tw + 1;
-    if (E.top < 0) E.top = 0;
-    if (E.left < 0) E.left = 0;
+/* Soft wrap: a logical line is shown as one or more visual rows. One column is kept
+ * spare so the cursor can sit after the last character of a full row. */
+typedef struct { int r, sub; } VRow;
+
+static int wrapw(void) {
+    int w = E.cols - gutter_w() - 1;
+    return w < 1 ? 1 : w;
 }
 
-static void draw_text_line(Abuf *ab, int r, int tw) {
+/* End byte (exclusive) of the visual row starting at byte s. */
+static int row_end(const Line *L, int s) {
+    int vc = 0, i = s, W = wrapw();
+    while (i < L->len) {
+        int cp; int n = u8dec(L->s + i, L->len - i, &cp);
+        int w = cp == '\t' ? TABW - vc % TABW : (cp < 0 ? 1 : cpwidth(cp));
+        if (vc + w > W && i > s) break;
+        vc += w; i += n;
+    }
+    return i;
+}
+
+static int line_nrows(const Line *L) {
+    int n = 1;
+    for (int s = row_end(L, 0); s < L->len; s = row_end(L, s)) n++;
+    return n;
+}
+
+static void row_bounds(const Line *L, int sub, int *s, int *e) {
+    int st = 0, en = row_end(L, 0);
+    for (int k = 0; k < sub && en < L->len; k++) { st = en; en = row_end(L, st); }
+    *s = st; *e = en;
+}
+
+/* Which wrapped row holds byte c; also gives that row's bounds. */
+static int cur_row(const Line *L, int c, int *s, int *e) {
+    int st = 0, en = row_end(L, 0), sub = 0;
+    while (c >= en && en < L->len) { st = en; en = row_end(L, st); sub++; }
+    *s = st; *e = en;
+    return sub;
+}
+
+static int rcol(const Line *L, int s, int c) {
+    int vc = 0;
+    for (int i = s; i < c && i < L->len;) {
+        int cp; int n = u8dec(L->s + i, L->len - i, &cp);
+        vc += cp == '\t' ? TABW - vc % TABW : (cp < 0 ? 1 : cpwidth(cp));
+        i += n;
+    }
+    return vc;
+}
+
+/* Byte in row [s,e) at display column col; never leaves the row. */
+static int c_from_rcol(const Line *L, int s, int e, int col) {
+    int vc = 0, i = s;
+    while (i < e) {
+        int cp; int n = u8dec(L->s + i, L->len - i, &cp);
+        int w = cp == '\t' ? TABW - vc % TABW : (cp < 0 ? 1 : cpwidth(cp));
+        if (vc + w > col) return i;
+        vc += w; i += n;
+    }
+    return (e < L->len && e > s) ? prev_c(L, e) : e;
+}
+
+static int vrow_step(VRow *v, int d) {
+    if (d > 0) {
+        if (v->sub + 1 < line_nrows(&E.l[v->r])) { v->sub++; return 1; }
+        if (v->r + 1 < E.n) { v->r++; v->sub = 0; return 1; }
+    } else {
+        if (v->sub > 0) { v->sub--; return 1; }
+        if (v->r > 0) { v->r--; v->sub = line_nrows(&E.l[v->r]) - 1; return 1; }
+    }
+    return 0;
+}
+static int vrow_cmp(VRow a, VRow b) { return a.r != b.r ? a.r - b.r : a.sub - b.sub; }
+
+static VRow cursor_vrow(void) {
+    int s, e;
+    VRow v = { E.cur.r, cur_row(&E.l[E.cur.r], E.cur.c, &s, &e) };
+    return v;
+}
+
+static VRow top_vrow(void) {
+    VRow t = { E.top, E.topsub };
+    if (t.r >= E.n) t.r = E.n - 1;
+    if (t.r < 0) t.r = 0;
+    int nr = line_nrows(&E.l[t.r]);
+    if (t.sub >= nr) t.sub = nr - 1;
+    if (t.sub < 0) t.sub = 0;
+    return t;
+}
+
+static int scr_cy, scr_cx; /* cursor position inside the text area, 0-based */
+
+static void scroll(void) {
+    int th = E.rows - 2;
+    VRow c = cursor_vrow(), t = top_vrow();
+    if (vrow_cmp(c, t) < 0) t = c;
+    else {
+        VRow x = t; int found = 0;
+        for (int d = 0; d < th; d++) {
+            if (vrow_cmp(x, c) == 0) { found = 1; break; }
+            if (!vrow_step(&x, 1)) break;
+        }
+        if (!found) {
+            t = c;
+            for (int i = 0; i < th - 1; i++) vrow_step(&t, -1);
+        }
+    }
+    E.top = t.r; E.topsub = t.sub;
+    scr_cy = 0;
+    for (VRow x = t; vrow_cmp(x, c) < 0 && scr_cy < th; scr_cy++) vrow_step(&x, 1);
+    int s, e;
+    cur_row(&E.l[c.r], E.cur.c, &s, &e);
+    scr_cx = rcol(&E.l[c.r], s, E.cur.c);
+}
+
+/* Move the viewport by n visual rows, dragging the cursor along if it falls out of view. */
+static void scroll_view(int n) {
+    int th = E.rows - 2, d = n < 0 ? -1 : 1;
+    VRow t = top_vrow();
+    for (int i = 0; i < (n < 0 ? -n : n); i++) if (!vrow_step(&t, d)) break;
+    E.top = t.r; E.topsub = t.sub;
+    VRow bot = t;
+    for (int i = 0; i < th - 1; i++) if (!vrow_step(&bot, 1)) break;
+    VRow c = cursor_vrow(), target = c;
+    if (vrow_cmp(c, t) < 0) target = t;
+    else if (vrow_cmp(c, bot) > 0) target = bot;
+    else return;
+    int s, e;
+    Line *L = &E.l[E.cur.r];
+    cur_row(L, E.cur.c, &s, &e);
+    int col = E.want >= 0 ? E.want : rcol(L, s, E.cur.c);
+    Line *N = &E.l[target.r];
+    row_bounds(N, target.sub, &s, &e);
+    E.cur.r = target.r; E.cur.c = c_from_rcol(N, s, e, col);
+    E.want = col; E.want_keep = 1;
+}
+
+/* Draw bytes [s,e) of line r (one visual row). */
+static void draw_text_row(Abuf *ab, int r, int s, int e) {
     Line *L = &E.l[r];
     Pos a, b; int hs = has_sel();
     if (hs) sel_range(&a, &b);
-    int vc = 0, insel = 0;
-    const char *SEL = "\x1b[48;5;24;38;5;255m";
-    #define SETSEL(on) do { if ((on) != insel) { ab_str(ab, (on) ? SEL : "\x1b[m"); insel = (on); } } while (0)
-    for (int i = 0; i < L->len && vc < E.left + tw;) {
+    int vc = 0, cur_cls = C_NONE;
+    const uint8_t *cls = hl_line(r);
+    #define SETCLS(c) do { int c_ = (c); if (c_ != cur_cls) { ab_str(ab, "\x1b[m"); if (c_ != C_NONE) { ab_str(ab, "\x1b["); ab_str(ab, class_sgr[c_]); ab_str(ab, "m"); } cur_cls = c_; } } while (0)
+    for (int i = s; i < e;) {
         int cp; int n = u8dec(L->s + i, L->len - i, &cp);
         int w = cp == '\t' ? TABW - vc % TABW : (cp < 0 ? 1 : cpwidth(cp));
         int sel = 0;
         if (hs) { Pos p = { r, i }; sel = pos_cmp(p, a) >= 0 && pos_cmp(p, b) < 0; }
-        if (vc + w > E.left && (vc < E.left + tw)) {
-            SETSEL(sel);
-            if (vc < E.left || vc + w > E.left + tw) {
-                int s = vc < E.left ? E.left : vc, e = vc + w > E.left + tw ? E.left + tw : vc + w;
-                for (int k = s; k < e; k++) ab_str(ab, " ");
-            } else if (cp == '\t') {
-                for (int k = 0; k < w; k++) ab_str(ab, " ");
-            } else if (cp < 0 || cp < 32 || cp == 127) {
-                ab_str(ab, "?");
-            } else {
-                ab_add(ab, L->s + i, n);
-            }
-        }
+        SETCLS(sel ? C_SEL : (cls ? cls[i] : C_NONE));
+        if (cp == '\t') { for (int k = 0; k < w; k++) ab_str(ab, " "); }
+        else if (cp < 0 || cp < 32 || cp == 127) ab_str(ab, "?");
+        else ab_add(ab, L->s + i, n);
         vc += w; i += n;
     }
-    if (hs && vc >= E.left && vc < E.left + tw) {
+    if (hs && e == L->len) {
         Pos p = { r, L->len };
-        if (pos_cmp(p, a) >= 0 && pos_cmp(p, b) < 0) { SETSEL(1); ab_str(ab, " "); }
+        if (pos_cmp(p, a) >= 0 && pos_cmp(p, b) < 0) { SETCLS(C_SEL); ab_str(ab, " "); }
     }
-    SETSEL(0);
+    SETCLS(C_NONE);
     ab_str(ab, "\x1b[K");
-    #undef SETSEL
+    #undef SETCLS
 }
 
 static void draw(void) {
     scroll();
     Abuf ab = {0};
-    int th = E.rows - 2, gw = gutter_w(), tw = E.cols - gw;
+    int th = E.rows - 2, gw = gutter_w();
     ab_str(&ab, "\x1b[?25l\x1b[H");
+    VRow v = top_vrow();
+    int more = 1;
     for (int y = 0; y < th; y++) {
-        int r = E.top + y;
-        if (r < E.n) {
-            ab_fmt(&ab, r == E.cur.r ? "\x1b[38;5;250m%*d \x1b[m" : "\x1b[38;5;240m%*d \x1b[m", gw - 1, r + 1);
-            draw_text_line(&ab, r, tw);
+        if (more) {
+            Line *L = &E.l[v.r];
+            int s, e;
+            row_bounds(L, v.sub, &s, &e);
+            if (v.sub == 0)
+                ab_fmt(&ab, v.r == E.cur.r ? "\x1b[38;5;250m%*d \x1b[m" : "\x1b[38;5;240m%*d \x1b[m", gw - 1, v.r + 1);
+            else
+                ab_fmt(&ab, "%*s", gw, "");
+            draw_text_row(&ab, v.r, s, e);
+            more = vrow_step(&v, 1);
         } else {
             ab_str(&ab, "\x1b[38;5;240m~\x1b[m\x1b[K");
         }
@@ -710,9 +1232,7 @@ static void draw(void) {
     ab_str(&ab, "\x1b[38;5;245m");
     ab_add(&ab, msg, ml);
     ab_str(&ab, "\x1b[m\x1b[K");
-    int cy = E.cur.r - E.top + 1;
-    int cx = col_of(&E.l[E.cur.r], E.cur.c) - E.left + gw + 1;
-    ab_fmt(&ab, "\x1b[%d;%dH\x1b[?25h", cy, cx);
+    ab_fmt(&ab, "\x1b[%d;%dH\x1b[?25h", scr_cy + 1, scr_cx + gw + 1);
     term_write(ab.b, ab.len);
     free(ab.b);
 }
@@ -855,17 +1375,22 @@ static void move_key(int key) {
     case K_UP: case K_DOWN: case K_PGUP: case K_PGDN: {
         int d = (base == K_UP || base == K_PGUP) ? -1 : 1;
         int amt = (base == K_PGUP || base == K_PGDN) ? th - 1 : 1;
-        if (!E.want_keep || E.want < 0) E.want = col_of(L, E.cur.c);
+        int rs, re;
+        cur_row(L, E.cur.c, &rs, &re);
+        if (!E.want_keep || E.want < 0) E.want = rcol(L, rs, E.cur.c);
         E.want_keep = 1;
-        int nr = E.cur.r + d * amt;
-        if (nr < 0) { nr = 0; if (d < 0 && base == K_UP) { E.cur.c = 0; E.cur.r = 0; E.want = 0; break; } }
-        if (nr >= E.n) {
-            nr = E.n - 1;
-            if (base == K_DOWN) { E.cur.r = nr; E.cur.c = E.l[nr].len; E.want = -1; break; }
+        VRow v = cursor_vrow();
+        int moved = 0;
+        for (int i = 0; i < amt; i++) { if (!vrow_step(&v, d)) break; moved++; }
+        if (!moved) {
+            if (d < 0) { E.cur.c = 0; E.want = 0; }
+            else { E.cur.c = L->len; E.want = -1; }
+            break;
         }
-        if (base == K_PGUP || base == K_PGDN) { E.top += d * amt; if (E.top < 0) E.top = 0; }
-        E.cur.r = nr;
-        E.cur.c = c_from_col(&E.l[nr], E.want);
+        Line *N = &E.l[v.r];
+        row_bounds(N, v.sub, &rs, &re);
+        E.cur.r = v.r;
+        E.cur.c = c_from_rcol(N, rs, re, E.want);
         break;
     }
     case K_HOME:
@@ -1201,6 +1726,7 @@ static void do_replace(void) {
     }
     free(rep);
     E.sel = 0;
+    hl_valid = 0;
     clamp_cursor();
     set_msg("Replaced %d occurrence%s", count, count == 1 ? "" : "s");
 }
@@ -1213,6 +1739,7 @@ static void do_save(int as) {
         if (!f || !*f) { free(f); set_msg("Save cancelled"); return; }
         free(E.file); E.file = f;
     }
+    detect_lang();
     if (save_file() != 0) set_msg("Can't save %s: %s", E.file, strerror(errno));
 }
 
@@ -1293,13 +1820,14 @@ static void show_help(void) {
 /* ---------- mouse ---------- */
 
 static Pos screen_to_pos(int x, int y) {
-    Pos p;
-    p.r = E.top + (y - 1);
-    if (p.r < 0) p.r = 0;
-    if (p.r >= E.n) p.r = E.n - 1;
-    int col = E.left + (x - 1 - gutter_w());
+    VRow v = top_vrow();
+    for (int i = 0; i < y - 1; i++) if (!vrow_step(&v, 1)) break;
+    Line *L = &E.l[v.r];
+    int rs, re;
+    row_bounds(L, v.sub, &rs, &re);
+    int col = x - 1 - gutter_w();
     if (col < 0) col = 0;
-    p.c = c_from_col(&E.l[p.r], col);
+    Pos p = { v.r, c_from_rcol(L, rs, re, col) };
     return p;
 }
 
@@ -1307,13 +1835,7 @@ static void handle_mouse(void) {
     int b = mouse_b & 3, wheel = mouse_b & 64, drag = mouse_b & 32;
     int th = E.rows - 2;
     if (wheel) {
-        int d = (mouse_b & 1) ? 3 : -3;
-        E.top += d;
-        if (E.top > E.n - 1) E.top = E.n - 1;
-        if (E.top < 0) E.top = 0;
-        if (E.cur.r < E.top) { E.cur.r = E.top; E.cur.c = c_from_col(&E.l[E.cur.r], E.want < 0 ? 0 : E.want); }
-        if (E.cur.r >= E.top + th) { E.cur.r = E.top + th - 1; if (E.cur.r >= E.n) E.cur.r = E.n - 1; E.cur.c = c_from_col(&E.l[E.cur.r], E.want < 0 ? 0 : E.want); }
-        E.want_keep = 1;
+        scroll_view((mouse_b & 1) ? 3 : -3);
         return;
     }
     if (b != 0 || mouse_y > th) return;
@@ -1340,14 +1862,7 @@ static void process_key(int key) {
 
     switch (base) {
     case K_UP: case K_DOWN:
-        if (ctrl && !shift && !alt) { /* scroll viewport */
-            E.top += base == K_UP ? -1 : 1;
-            if (E.top < 0) E.top = 0;
-            if (E.top > E.n - 1) E.top = E.n - 1;
-            if (E.cur.r < E.top) E.cur.r = E.top, E.cur.c = c_from_col(&E.l[E.cur.r], 0);
-            if (E.cur.r >= E.top + E.rows - 2) { E.cur.r = E.top + E.rows - 3; if (E.cur.r >= E.n) E.cur.r = E.n - 1; }
-            return;
-        }
+        if (ctrl && !shift && !alt) { scroll_view(base == K_UP ? -1 : 1); return; } /* scroll viewport */
         /* fallthrough */
     case K_LEFT: case K_RIGHT: case K_HOME: case K_END: case K_PGUP: case K_PGDN:
         move_key(key & ~M_ALT);
@@ -1424,6 +1939,7 @@ int main(int argc, char **argv) {
         if (r == 0) set_msg("New file %s", E.file);
         else set_msg("Opened %s (%d lines)", E.file, E.n);
     }
+    detect_lang();
     struct sigaction sa;
     memset(&sa, 0, sizeof sa);
     sa.sa_handler = on_signal;
@@ -1441,10 +1957,11 @@ int main(int argc, char **argv) {
         E.lastkind = 0;
         E.want_keep = 0;
                 if (esc_pending) {
+            if (key == K_RESIZE || key == K_MOUSE) continue; /* redraw only, keep waiting */
             esc_pending = 0;
             if (key == KEY_ESC) do_quit();
-            else if (key != K_RESIZE && key != K_MOUSE) E.msg[0] = 0;
-            if (key != K_RESIZE && key != K_MOUSE) continue;
+            else E.msg[0] = 0;
+            continue;
         }
         process_key(key);
         clamp_cursor();

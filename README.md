@@ -35,4 +35,11 @@ Copy also writes to the system clipboard through OSC 52 (Windows Terminal, kitty
 Search is case-insensitive unless the query has an uppercase letter. CRLF files and a missing
 final newline are preserved on save.
 
+## Wrapping and highlighting
 
+Long lines soft-wrap to the window width (Up/Down move by screen row, the mouse works on wrapped rows).
+
+Syntax highlighting is picked from the file extension: Markdown (colours follow the notes editor on the
+download site: bold pink-red, green headings/list markers/links, dim struck-through `- [x]` items, code
+spans and fences), JavaScript/TypeScript, Python, JSON, HTML (with embedded `<script>`/`<style>`), CSS,
+C/C++, and shell-style files (`.sh`, `.yml`, `.toml`, `.conf`, `.ini`, `Makefile`, ...).
