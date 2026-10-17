@@ -1352,15 +1352,6 @@ static void move_key(int key) {
     } else E.sel = 0;
 
     Line *L = &E.l[E.cur.r];
-    if (ctrl && (base == K_UP || base == K_DOWN)) { /* jump to previous/next blank line */
-        int d = base == K_UP ? -1 : 1, r = E.cur.r + d;
-        while (r > 0 && r < E.n - 1 && !(E.l[r].len == 0 && E.l[r - d].len != 0)) r += d;
-        if (r < 0) r = 0;
-        if (r >= E.n) r = E.n - 1;
-        E.cur.r = r;
-        E.cur.c = (d > 0 && r == E.n - 1) ? E.l[r].len : 0;
-        return;
-    }
     switch (base) {
     case K_LEFT:
         if (ctrl) word_left();
@@ -1790,7 +1781,6 @@ static void show_help(void) {
         "           (named files autosave about 1s after every change)",
         "Select     Shift+Arrows         Ctrl+Shift+Arrows (by word)",
         "           Shift+Home/End       Ctrl+A select all     mouse drag / shift+click",
-        "           Ctrl+Shift+Up/Down select by paragraph",
         "Move       Ctrl+Left/Right word Home smart home       Ctrl+Home/End file ends",
         "           PgUp/PgDn page",
         "Clipboard  Ctrl+C copy          Ctrl+X cut            Ctrl+V paste",
