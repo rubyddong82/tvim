@@ -26,7 +26,6 @@ tvim notes.txt
 | Delete word | Ctrl+Backspace, Ctrl+Delete |
 | Delete line | Ctrl+K |
 | Duplicate line/selection | Ctrl+D |
-| Move line(s) | Alt+Up/Down, or Alt+K / Alt+J (Windows Terminal can swallow Alt+Arrow for pane focus) |
 | Indent / unindent | Tab / Shift+Tab |
 | Find | Ctrl+F (Enter/Down next, Up previous, Esc done), F3 / Shift+F3 |
 | Replace all | Ctrl+R |

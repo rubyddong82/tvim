@@ -1018,22 +1018,6 @@ static void delete_line(void) {
     E.cur.c = 0;
 }
 
-static void move_lines(int dir) {
-    int r1, r2; line_span(&r1, &r2);
-    if (dir < 0 ? r1 == 0 : r2 == E.n - 1) return;
-    undo_begin(0);
-    if (dir < 0) {
-        Line t = E.l[r1 - 1];
-        memmove(&E.l[r1 - 1], &E.l[r1], (r2 - r1 + 1) * sizeof(Line));
-        E.l[r2] = t;
-    } else {
-        Line t = E.l[r2 + 1];
-        memmove(&E.l[r1 + 1], &E.l[r1], (r2 - r1 + 1) * sizeof(Line));
-        E.l[r1] = t;
-    }
-    E.cur.r += dir; E.anc.r += dir;
-}
-
 static void duplicate(void) {
     undo_begin(0);
     if (has_sel()) {
@@ -1287,7 +1271,6 @@ static void show_help(void) {
         "Edit       Ctrl+Z undo          Ctrl+Y / Ctrl+Shift+Z redo",
         "           Ctrl+Backspace/Delete delete word          Ctrl+K delete line",
         "           Ctrl+D duplicate line/selection",
-        "           Alt+Up/Down (or Alt+K / Alt+J)  move line(s)",
         "           Tab / Shift+Tab indent / unindent",
         "Search     Ctrl+F find          F3 / Shift+F3 next / prev",
         "           Ctrl+R replace all",
@@ -1357,7 +1340,6 @@ static void process_key(int key) {
 
     switch (base) {
     case K_UP: case K_DOWN:
-        if (alt && !shift) { move_lines(base == K_UP ? -1 : 1); return; }
         if (ctrl && !shift && !alt) { /* scroll viewport */
             E.top += base == K_UP ? -1 : 1;
             if (E.top < 0) E.top = 0;
@@ -1389,8 +1371,6 @@ static void process_key(int key) {
 
     if (alt) {
         if (base == KEY_BS) do_backspace(1);
-        else if (base == 'k') move_lines(-1);
-        else if (base == 'j') move_lines(1);
         return;
     }
 
