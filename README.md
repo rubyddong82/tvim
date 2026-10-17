@@ -16,11 +16,11 @@ tvim notes.txt
 
 | Action | Keys |
 |---|---|
-| Save / Save as | Ctrl+S / Ctrl+O (or F2) |
-| Save & quit | Esc or Ctrl+Q (asks for a file name if the buffer has none; declining warns that nothing is saved) |
-| Autosave | Named files are saved 2 s after you stop typing |
+| Autosave | Named files are saved about 1 s after every change (there is no Ctrl+S) |
+| Save as | Ctrl+O (or F2) |
+| Exit | Esc, then Esc again (any other key returns to the editor). Saves on exit; asks for a file name if the buffer has none, and warns that nothing is saved if you decline |
 | Select | Shift+Arrows, Ctrl+Shift+Left/Right (by word), Ctrl+Shift+Up/Down (by paragraph), Shift+Home/End, Ctrl+A, mouse drag, Shift+click |
-| Move | Arrows, Ctrl+Left/Right (word), Home (smart), End, Ctrl+Home/End, PgUp/PgDn, Ctrl+G (go to line) |
+| Move | Arrows, Ctrl+Left/Right (word), Home (smart), End, Ctrl+Home/End, PgUp/PgDn |
 | Copy / Cut / Paste | Ctrl+C / Ctrl+X / Ctrl+V (no selection = whole line); terminal paste works too |
 | Undo / Redo | Ctrl+Z / Ctrl+Y |
 | Delete word | Ctrl+Backspace, Ctrl+Delete |
@@ -35,3 +35,5 @@ tvim notes.txt
 Copy also writes to the system clipboard through OSC 52 (Windows Terminal, kitty, iTerm2, ...).
 Search is case-insensitive unless the query has an uppercase letter. CRLF files and a missing
 final newline are preserved on save.
+
+

@@ -704,7 +704,7 @@ static void draw(void) {
     ab_str(&ab, "\x1b[m\r\n");
     /* message line */
     const char *msg = E.msg;
-    char hint[] = "Ctrl+S Save | Ctrl+Q Quit | Ctrl+F Find | Ctrl+G Go to line | F1 Help";
+    char hint[] = "Esc Exit (autosaves) | Ctrl+F Find | Ctrl+R Replace | F1 Help";
     if (!(msg[0] && time(NULL) - E.msgt < 5)) msg = hint;
     int ml = (int)strlen(msg); if (ml > E.cols) ml = E.cols;
     ab_str(&ab, "\x1b[38;5;245m");
@@ -1221,17 +1221,6 @@ static void do_replace(void) {
     set_msg("Replaced %d occurrence%s", count, count == 1 ? "" : "s");
 }
 
-static void do_goto(void) {
-    char *s = prompt("Go to line: ", NULL, NULL);
-    if (!s) return;
-    int n = atoi(s);
-    free(s);
-    if (n < 1) return;
-    if (n > E.n) n = E.n;
-    E.sel = 0;
-    E.cur.r = n - 1; E.cur.c = 0;
-}
-
 /* ---------- save / quit ---------- */
 
 static void do_save(int as) {
@@ -1244,7 +1233,7 @@ static void do_save(int as) {
 }
 
 static int autosave_tick(void) {
-    if (!E.dirty || !E.file || time(NULL) - E.lastedit < 2) return 0;
+    if (!E.dirty || !E.file || time(NULL) - E.lastedit < 1) return 0;
     E.lastedit = time(NULL);
     if (save_file() != 0) { set_msg("Autosave failed for %s: %s", E.file, strerror(errno)); }
     else { size_t n = strlen(E.msg); (void)n; char t[512]; snprintf(t, sizeof t, "Autosaved %s", E.file); set_msg("%s", t); }
@@ -1286,13 +1275,13 @@ static void show_help(void) {
     static const char *lines[] = {
         "tvim " TVIM_VERSION " - keys",
         "",
-        "File       Ctrl+S save          Ctrl+O save as        Esc / Ctrl+Q save & quit",
-        "           (named files also autosave 2s after you stop typing)",
+        "File       Esc, Esc save & exit   Ctrl+O save as (name the file)",
+        "           (named files autosave about 1s after every change)",
         "Select     Shift+Arrows         Ctrl+Shift+Arrows (by word)",
         "           Shift+Home/End       Ctrl+A select all     mouse drag / shift+click",
         "           Ctrl+Shift+Up/Down select by paragraph",
         "Move       Ctrl+Left/Right word Home smart home       Ctrl+Home/End file ends",
-        "           PgUp/PgDn page       Ctrl+G go to line",
+        "           PgUp/PgDn page",
         "Clipboard  Ctrl+C copy          Ctrl+X cut            Ctrl+V paste",
         "           (no selection = whole line; terminal paste also works)",
         "Edit       Ctrl+Z undo          Ctrl+Y / Ctrl+Shift+Z redo",
@@ -1360,6 +1349,8 @@ static void handle_mouse(void) {
 
 /* ---------- main loop ---------- */
 
+static int esc_pending;
+
 static void process_key(int key) {
     int base = K_BASE(key);
     int shift = key & M_SHIFT, ctrl = key & M_CTRL, alt = key & M_ALT;
@@ -1404,9 +1395,7 @@ static void process_key(int key) {
     }
 
     switch (key) {
-    case CTRL('s'): do_save(0); return;
     case CTRL('o'): do_save(1); return;
-    case CTRL('q'): do_quit(); return;
     case CTRL('a'):
         E.anc.r = 0; E.anc.c = 0; E.sel = 1;
         E.cur.r = E.n - 1; E.cur.c = E.l[E.cur.r].len;
@@ -1418,14 +1407,16 @@ static void process_key(int key) {
     case CTRL('y'): do_redo(); clamp_cursor(); return;
     case CTRL('f'): do_find(); return;
     case CTRL('r'): do_replace(); return;
-    case CTRL('g'): do_goto(); return;
     case CTRL('k'): delete_line(); return;
     case CTRL('d'): duplicate(); return;
     case CTRL('h'): do_backspace(1); return; /* Ctrl+Backspace on most terminals */
     case KEY_BS: do_backspace(0); return;
     case KEY_ENTER: insert_newline(); return;
     case KEY_TAB: do_tab(0); return;
-    case KEY_ESC: do_quit(); return;
+    case KEY_ESC:
+        esc_pending = 1;
+        set_msg("Press Esc again to save & exit - any other key returns to the editor");
+        return;
     }
     if (key >= 32 && key < K_SPECIAL) insert_cp(key);
 }
@@ -1469,7 +1460,12 @@ int main(int argc, char **argv) {
         E.prevkind = E.lastkind;
         E.lastkind = 0;
         E.want_keep = 0;
-        if (key != CTRL('q')) E.quit_warn = 0;
+                if (esc_pending) {
+            esc_pending = 0;
+            if (key == KEY_ESC) do_quit();
+            else if (key != K_RESIZE && key != K_MOUSE) E.msg[0] = 0;
+            if (key != K_RESIZE && key != K_MOUSE) continue;
+        }
         process_key(key);
         clamp_cursor();
         if (!E.want_keep) E.want = -1;
