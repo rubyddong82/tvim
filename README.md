@@ -16,15 +16,17 @@ tvim notes.txt
 
 | Action | Keys |
 |---|---|
-| Save / Save as / Quit | Ctrl+S / Ctrl+O (or F2) / Ctrl+Q |
-| Select | Shift+Arrows, Ctrl+Shift+Left/Right (by word), Shift+Home/End, Ctrl+A, mouse drag, Shift+click |
+| Save / Save as | Ctrl+S / Ctrl+O (or F2) |
+| Save & quit | Esc or Ctrl+Q (asks for a file name if the buffer has none; declining warns that nothing is saved) |
+| Autosave | Named files are saved 2 s after you stop typing |
+| Select | Shift+Arrows, Ctrl+Shift+Left/Right (by word), Ctrl+Shift+Up/Down (by paragraph), Shift+Home/End, Ctrl+A, mouse drag, Shift+click |
 | Move | Arrows, Ctrl+Left/Right (word), Home (smart), End, Ctrl+Home/End, PgUp/PgDn, Ctrl+G (go to line) |
 | Copy / Cut / Paste | Ctrl+C / Ctrl+X / Ctrl+V (no selection = whole line); terminal paste works too |
 | Undo / Redo | Ctrl+Z / Ctrl+Y |
 | Delete word | Ctrl+Backspace, Ctrl+Delete |
 | Delete line | Ctrl+K |
 | Duplicate line/selection | Ctrl+D |
-| Move line(s) | Alt+Up/Down or Ctrl+Shift+Up/Down |
+| Move line(s) | Alt+Up/Down, or Alt+K / Alt+J (Windows Terminal can swallow Alt+Arrow for pane focus) |
 | Indent / unindent | Tab / Shift+Tab |
 | Find | Ctrl+F (Enter/Down next, Up previous, Esc done), F3 / Shift+F3 |
 | Replace all | Ctrl+R |

@@ -59,6 +59,7 @@ static struct {
     char *clip; size_t cliplen; int cliplines;
     Snap *undo; int nundo; Snap *redo; int nredo;
     int lastkind, prevkind;
+    time_t lastedit;
     char *lastq;
     int quit_warn;
     struct termios orig; int raw;
@@ -319,6 +320,7 @@ static void undo_begin(int kind) {
     E.lastkind = kind;
     stack_clear(&E.redo, &E.nredo);
     E.dirty = 1;
+    E.lastedit = time(NULL);
     E.quit_warn = 0;
 }
 
@@ -328,6 +330,7 @@ static void do_undo(void) {
     Snap *s = &E.undo[--E.nundo];
     snap_restore(s);
     E.dirty = 1;
+    E.lastedit = time(NULL);
 }
 static void do_redo(void) {
     if (!E.nredo) { set_msg("Nothing to redo"); return; }
@@ -335,6 +338,7 @@ static void do_redo(void) {
     Snap *s = &E.redo[--E.nredo];
     snap_restore(s);
     E.dirty = 1;
+    E.lastedit = time(NULL);
 }
 
 /* ---------- terminal ---------- */
@@ -448,6 +452,7 @@ static int read_csi(void) {
         int m = params[1] - 1;
         if (m & 1) mod |= M_SHIFT;
         if (m & 2) mod |= M_ALT;
+        if (m & 8) mod |= M_ALT; /* some terminals report Alt as Meta */
         if (m & 4) mod |= M_CTRL;
     }
     if (priv == '<' && (c == 'M' || c == 'm') && nparams >= 3) {
@@ -483,13 +488,15 @@ static int read_csi(void) {
     return K_NONE;
 }
 
+static int autosave_tick(void);
+
 static int read_key(void) {
     for (;;) {
         if (g_term) { term_restore(); _exit(128 + g_term); }
         if (g_resize) { g_resize = 0; get_size(); return K_RESIZE; }
         int c = rd();
         if (c == -2) { term_restore(); _exit(1); }
-        if (c == -1) continue;
+        if (c == -1) { if (autosave_tick()) return K_RESIZE; continue; }
         if (c == KEY_ESC) {
             int c2 = rd();
             if (c2 < 0) return KEY_ESC;
@@ -504,7 +511,17 @@ static int read_key(void) {
                 }
                 return K_NONE;
             }
-            if (c2 == KEY_ESC) return KEY_ESC;
+            if (c2 == KEY_ESC) { /* ESC ESC [ A style Alt+Arrow */
+                int c3 = rd();
+                if (c3 == '[') { int k = read_csi(); return k >= K_SPECIAL ? (k | M_ALT) : KEY_ESC; }
+                if (c3 == 'O') {
+                    switch (rd()) {
+                    case 'A': return K_UP | M_ALT; case 'B': return K_DOWN | M_ALT;
+                    case 'C': return K_RIGHT | M_ALT; case 'D': return K_LEFT | M_ALT;
+                    }
+                }
+                return KEY_ESC;
+            }
             if (c2 == KEY_BS || c2 == 8) return KEY_BS | M_ALT; /* Alt+Backspace */
             return c2 | M_ALT;
         }
@@ -815,6 +832,15 @@ static void move_key(int key) {
     } else E.sel = 0;
 
     Line *L = &E.l[E.cur.r];
+    if (ctrl && (base == K_UP || base == K_DOWN)) { /* jump to previous/next blank line */
+        int d = base == K_UP ? -1 : 1, r = E.cur.r + d;
+        while (r > 0 && r < E.n - 1 && !(E.l[r].len == 0 && E.l[r - d].len != 0)) r += d;
+        if (r < 0) r = 0;
+        if (r >= E.n) r = E.n - 1;
+        E.cur.r = r;
+        E.cur.c = (d > 0 && r == E.n - 1) ? E.l[r].len : 0;
+        return;
+    }
     switch (base) {
     case K_LEFT:
         if (ctrl) word_left();
@@ -1217,14 +1243,41 @@ static void do_save(int as) {
     if (save_file() != 0) set_msg("Can't save %s: %s", E.file, strerror(errno));
 }
 
-static void do_quit(void) {
-    if (E.dirty && !E.quit_warn) {
-        E.quit_warn = 1;
-        set_msg("Unsaved changes! Ctrl+Q again to discard, Ctrl+S to save.");
-        return;
-    }
+static int autosave_tick(void) {
+    if (!E.dirty || !E.file || time(NULL) - E.lastedit < 2) return 0;
+    E.lastedit = time(NULL);
+    if (save_file() != 0) { set_msg("Autosave failed for %s: %s", E.file, strerror(errno)); }
+    else { size_t n = strlen(E.msg); (void)n; char t[512]; snprintf(t, sizeof t, "Autosaved %s", E.file); set_msg("%s", t); }
+    return 1;
+}
+
+static void quit_now(void) {
     term_restore();
     exit(0);
+}
+
+/* Esc / Ctrl+Q: save (asking for a name if needed) and leave. */
+static void do_quit(void) {
+    if (E.file) {
+        if (E.dirty && save_file() != 0) { set_msg("Can't save %s: %s - not quitting", E.file, strerror(errno)); return; }
+        quit_now();
+    }
+    if (!E.dirty && E.n == 1 && E.l[0].len == 0) quit_now();
+    for (;;) {
+        char *f = prompt("File name (Esc to skip): ", NULL, NULL);
+        if (f && *f) {
+            free(E.file); E.file = f;
+            if (save_file() != 0) { set_msg("Can't save %s: %s", E.file, strerror(errno)); free(E.file); E.file = NULL; return; }
+            quit_now();
+        }
+        free(f);
+        set_msg("Without a file name nothing is saved. Quit anyway? (y = quit, n = name it)");
+        draw();
+        int k;
+        do k = read_key(); while (k == K_RESIZE || k == K_MOUSE);
+        if (k == 'y' || k == 'Y') quit_now();
+        if (k != 'n' && k != 'N' && k != KEY_ENTER) { set_msg("Not quitting"); return; }
+    }
 }
 
 /* ---------- help ---------- */
@@ -1233,9 +1286,11 @@ static void show_help(void) {
     static const char *lines[] = {
         "tvim " TVIM_VERSION " - keys",
         "",
-        "File       Ctrl+S save          Ctrl+O save as        Ctrl+Q quit",
+        "File       Ctrl+S save          Ctrl+O save as        Esc / Ctrl+Q save & quit",
+        "           (named files also autosave 2s after you stop typing)",
         "Select     Shift+Arrows         Ctrl+Shift+Arrows (by word)",
         "           Shift+Home/End       Ctrl+A select all     mouse drag / shift+click",
+        "           Ctrl+Shift+Up/Down select by paragraph",
         "Move       Ctrl+Left/Right word Home smart home       Ctrl+Home/End file ends",
         "           PgUp/PgDn page       Ctrl+G go to line",
         "Clipboard  Ctrl+C copy          Ctrl+X cut            Ctrl+V paste",
@@ -1243,7 +1298,7 @@ static void show_help(void) {
         "Edit       Ctrl+Z undo          Ctrl+Y / Ctrl+Shift+Z redo",
         "           Ctrl+Backspace/Delete delete word          Ctrl+K delete line",
         "           Ctrl+D duplicate line/selection",
-        "           Alt+Up/Down or Ctrl+Shift+Up/Down  move line(s)",
+        "           Alt+Up/Down (or Alt+K / Alt+J)  move line(s)",
         "           Tab / Shift+Tab indent / unindent",
         "Search     Ctrl+F find          F3 / Shift+F3 next / prev",
         "           Ctrl+R replace all",
@@ -1312,8 +1367,7 @@ static void process_key(int key) {
     switch (base) {
     case K_UP: case K_DOWN:
         if (alt && !shift) { move_lines(base == K_UP ? -1 : 1); return; }
-        if (ctrl && shift) { move_lines(base == K_UP ? -1 : 1); return; }
-        if (ctrl && !shift) { /* scroll viewport */
+        if (ctrl && !shift && !alt) { /* scroll viewport */
             E.top += base == K_UP ? -1 : 1;
             if (E.top < 0) E.top = 0;
             if (E.top > E.n - 1) E.top = E.n - 1;
@@ -1344,6 +1398,8 @@ static void process_key(int key) {
 
     if (alt) {
         if (base == KEY_BS) do_backspace(1);
+        else if (base == 'k') move_lines(-1);
+        else if (base == 'j') move_lines(1);
         return;
     }
 
@@ -1369,7 +1425,7 @@ static void process_key(int key) {
     case KEY_BS: do_backspace(0); return;
     case KEY_ENTER: insert_newline(); return;
     case KEY_TAB: do_tab(0); return;
-    case KEY_ESC: E.sel = 0; return;
+    case KEY_ESC: do_quit(); return;
     }
     if (key >= 32 && key < K_SPECIAL) insert_cp(key);
 }
