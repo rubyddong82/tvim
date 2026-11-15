@@ -1497,6 +1497,10 @@ static char *prompt(const char *label, const char *init, PromptCb cb) {
             while (len > 0 && ((unsigned char)buf[len - 1] & 0xC0) == 0x80) len--;
             if (len > 0) len--;
             buf[len] = 0;
+        } else if (k == CTRL('w')) {
+            while (len > 0 && buf[len - 1] == ' ') len--;
+            while (len > 0 && buf[len - 1] != ' ') len--;
+            buf[len] = 0;
         } else if (k == K_PASTE) {
             for (size_t i = 0; i < paste_len && paste_buf[i] != '\n'; i++) {
                 if (len + 2 > cap) { cap *= 2; buf = xrealloc(buf, cap); }
@@ -2104,6 +2108,7 @@ static void process_key(int key) {
     case CTRL('k'): delete_line(); return;
     case CTRL('d'): duplicate(); return;
     case CTRL('h'): do_backspace(1); return; /* Ctrl+Backspace on most terminals */
+    case CTRL('w'): do_backspace(1); return; /* Ctrl+Backspace as sent by Windows Terminal (^W) */
     case KEY_BS: do_backspace(0); return;
     case KEY_ENTER: insert_newline(); return;
     case KEY_TAB: do_tab(0); return;
