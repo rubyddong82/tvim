@@ -1030,8 +1030,8 @@ static void detect_lang(void) {
 /* ---------- drawing ---------- */
 
 static int gutter_w(void) {
-    int d = 3; /* minimum 3 digits so text does not shift at 10 and 100 lines */
-    for (int n = E.n; n >= 1000; n /= 10) d++;
+    int d = 1;
+    for (int n = E.n; n >= 10; n /= 10) d++;
     return d + 2;
 }
 
